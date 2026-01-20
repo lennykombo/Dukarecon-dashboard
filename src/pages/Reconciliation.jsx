@@ -370,6 +370,8 @@ export default function Reconciliation({ businessId }) {
                   </div>
                   <div>
                     <p className="font-black text-slate-800 text-sm">{log.type === 'bank' ? 'BANK/SACCO' : 'M-PESA'}</p>
+                    <p className="text-[11px] font-bold text-slate-600 mt-0.5">
+                      Synced by: <span className="text-slate-800">{log.attendantName || "Unknown Device"}</span></p>
                     <p className="text-[10px] text-rose-500 font-bold uppercase tracking-widest">Missing Sale</p>
                   </div>
                 </td>
