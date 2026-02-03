@@ -15,6 +15,685 @@ import {
   Eye,
   Truck,
   Loader2,
+  Briefcase,
+  ArrowRightLeft,
+  FileText
+} from "lucide-react";
+import StatementUpload from "../components/StatementUpload";
+
+export default function Reconciliation({ businessId }) {
+  const [loading, setLoading] = useState(true);
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [activeTab, setActiveTab] = useState("all"); // 'all', 'sales', 'expenses', 'float', 'unmatched'
+  
+  // Data State
+  const [sales, setSales] = useState([]);
+  const [jobs, setJobs] = useState([]); // From 'accounts'
+  const [logs, setLogs] = useState([]);
+  const [expenses, setExpenses] = useState([]); 
+  
+  const [selectedTransaction, setSelectedTransaction] = useState(null);
+
+  const [stats, setStats] = useState({
+    smsMpesa: 0, smsBank: 0, smsExpenses: 0, smsFloat: 0,
+    appMpesa: 0, appBank: 0, appCash: 0,
+    expCash: 0, expDigital: 0, 
+    unmatchedLogs: [],
+    unmatchedExpenses: []
+  });
+
+  const fetchData = useCallback(async () => {
+    if (!businessId) return;
+    setLoading(true);
+
+    try {
+      const [year, month, day] = selectedDate.split('-').map(Number);
+      const start = new Date(year, month - 1, day, 0, 0, 0);
+      const end = new Date(year, month - 1, day, 23, 59, 59, 999);
+      const fireStart = Timestamp.fromDate(start);
+      const fireEnd = Timestamp.fromDate(end);
+
+      // 1. SALES (Payments)
+      const salesQ = query(collection(db, "payments"), where("businessId", "==", businessId), where("createdAt", ">=", fireStart), where("createdAt", "<=", fireEnd));
+      
+      // 2. JOBS (Accounts)
+      const accountsQ = query(collection(db, "accounts"), where("businessId", "==", businessId), where("createdAt", ">=", fireStart), where("createdAt", "<=", fireEnd));
+
+      // 3. LOGS (Mpesa Logs)
+      const logsQ = query(collection(db, "mpesa_logs"), where("businessId", "==", businessId), where("createdAt", ">=", fireStart), where("createdAt", "<=", fireEnd));
+
+      // 4. EXPENSES
+      const expQ = query(collection(db, "expenses"), where("businessId", "==", businessId), where("createdAt", ">=", fireStart), where("createdAt", "<=", fireEnd));
+
+      const [salesSnap, accountsSnap, logsSnap, expSnap] = await Promise.all([
+        getDocs(salesQ), 
+        getDocs(accountsQ), 
+        getDocs(logsQ), 
+        getDocs(expQ)
+      ]);
+
+      const salesData = salesSnap.docs.map(doc => ({id: doc.id, ...doc.data(), source: 'payment'}));
+      const jobsData = accountsSnap.docs.map(doc => ({id: doc.id, ...doc.data(), source: 'account'}));
+      const logsData = logsSnap.docs.map(doc => ({id: doc.id, ...doc.data()}));
+      const expData = expSnap.docs.map(doc => ({id: doc.id, ...doc.data(), source: 'expense'}));
+
+      setSales(salesData);
+      setJobs(jobsData);
+      setLogs(logsData);
+      setExpenses(expData);
+
+      // --- CALCULATIONS ---
+      
+      // A. PROCESS LOGS (The Truth Source)
+      /*let smsM = 0, smsB = 0, smsE = 0, smsF = 0;
+      
+      logsData.forEach(d => {
+        const amt = Number(d.amount || 0);
+        
+        if (d.category === 'income') {
+            // Check parser type OR keyword fallback for Bank
+            const isBank = d.type === 'bank_transfer_sale' || 
+                           d.type === 'bank_transfer' || 
+                           (d.sender && /bank|sacco|equity|kcb|co-op|ncba/i.test(d.sender));
+            
+            if (isBank) smsB += amt;
+            else smsM += amt;
+        }
+        else if (d.category === 'expense' || d.category === 'withdrawal') {
+            smsE += amt;
+        }
+        else if (d.category === 'float_in') {
+            smsF += amt;
+        }
+      });*/
+      // A. PROCESS LOGS (The Truth Source)
+      let smsM = 0, smsB = 0, smsP = 0, smsE = 0, smsF = 0; // <--- ADD smsP
+
+logsData.forEach(d => {
+  const amt = Number(d.amount || 0);
+
+  if (d.category === 'income') {
+      // 1. IS IT PAYBILL? (From your updated Parser)
+      if (d.type === 'paybill_sale') {
+          smsP += amt;
+      }
+      // 2. IS IT BANK? (Direct transfer)
+      else if (d.type === 'bank_transfer_sale' || 
+               d.type === 'bank_transfer' || 
+               (d.sender && /bank|sacco|equity|kcb|co-op/i.test(d.sender))) {
+          smsB += amt;
+      } 
+      // 3. IS IT NORMAL M-PESA?
+      else {
+          smsM += amt;
+      }
+  }
+  else if (d.category === 'expense' || d.category === 'withdrawal') {
+      smsE += amt;
+  }
+  else if (d.category === 'float_in') {
+      smsF += amt;
+  }
+});
+  
+
+      // B. PROCESS SALES (App Sales)
+      let appM = 0, appB = 0, appP = 0, appC = 0; // <--- ADD appP
+
+// Sum Payments
+salesData.forEach(d => {
+    const amt = Number(d.amount || 0);
+    const method = (d.paymentMethod || "").toLowerCase(); // Ensure your App sends 'paybill' or 'till' as method
+
+    if (method === 'cash') {
+       appC += amt; 
+    }
+    // Check for Paybill/Till
+    else if (method.includes('paybill') || method.includes('till') || method.includes('buy goods')) {
+       appP += amt;
+    }
+    // Check for Bank
+    else if (method.includes('bank') || method.includes('cheque') || method.includes('pesalink')) {
+       appB += amt;
+    }
+    else {
+       appM += amt;
+    }
+});
+
+      // C. PROCESS EXPENSES (App Expenses)
+      let expDigital = 0, expC = 0;
+      expData.forEach(d => {
+        const amt = Number(d.amount || 0);
+        const m = (d.paymentMethod || "").toLowerCase();
+        
+        // Check for ANY digital method
+        if (m === 'mpesa' || m === 'paybill' || m === 'till' || m === 'bank') {
+            expDigital += amt;
+        } else {
+            expC += amt; // Cash
+        }
+      });
+
+      // D. FIND UNMATCHED
+      // 1. Missing Sales (Money came in, no sale recorded)
+      const unmatchedLogs = logsData.filter(log => {
+        if (log.category !== 'income') return false; 
+        
+        // Check Sales & Jobs
+        const matchSale = salesData.some(sale => (sale.transactionCode || "").toUpperCase() === (log.transactionCode || "").toUpperCase());
+        const matchJob = jobsData.some(job => (job.transactionCode || "").toUpperCase() === (log.transactionCode || "").toUpperCase());
+
+        return !matchSale && !matchJob;
+      });
+
+      // 2. Missing Expenses (Money left, no expense recorded)
+      const unmatchedExpenses = logsData.filter(log => {
+         if (log.category !== 'expense' && log.category !== 'withdrawal') return false;
+         
+         const matchExp = expData.some(e => (e.transactionCode || "").toUpperCase() === (log.transactionCode || "").toUpperCase());
+         return !matchExp;
+      });
+
+      setStats({
+  smsMpesa: smsM, smsBank: smsB, smsPaybill: smsP, // <--- ADDED
+  smsExpenses: smsE, smsFloat: smsF,
+  appMpesa: appM, appBank: appB, appPaybill: appP, // <--- ADDED
+  appCash: appC,
+  expCash: expC, expDigital: expDigital,
+  unmatchedLogs, unmatchedExpenses
+});
+
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [businessId, selectedDate]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // VARIANCE CALCS
+  const mpesaDiff = stats.smsMpesa - stats.appMpesa;
+  const bankDiff = stats.smsBank - stats.appBank;
+  const expenseDiff = stats.smsExpenses - stats.expDigital; 
+  const netCash = stats.appCash - stats.expCash; 
+
+  const paybillDiff = stats.smsPaybill - stats.appPaybill;
+  // --- MERGE LISTS FOR TABLE DISPLAY ---
+  /*const getDisplayData = () => {
+    const combined = [];
+
+    // 1. Sales & Jobs
+    if (activeTab === 'all' || activeTab === 'sales') {
+        sales.forEach(s => combined.push({ ...s, type: 'sale', date: s.createdAt }));
+        jobs.filter(j => j.paidAmount > 0).forEach(j => combined.push({ ...j, type: 'job', amount: j.paidAmount, date: j.createdAt }));
+    }
+
+    // 2. Expenses
+    if (activeTab === 'all' || activeTab === 'expenses') {
+        expenses.forEach(e => combined.push({ ...e, type: 'app_expense', date: e.createdAt }));
+    }
+
+    // 3. Float Logs (Only from SMS)
+    if (activeTab === 'all' || activeTab === 'float') {
+        logs.filter(l => l.category === 'float_in').forEach(l => combined.push({ ...l, type: 'float_log', date: l.createdAt, description: "Float Deposit / B2C" }));
+    }
+
+    // 4. Unmatched
+    if (activeTab === 'unmatched') {
+        stats.unmatchedLogs.forEach(l => combined.push({ ...l, type: 'missing_sale', date: l.createdAt, description: "Unrecorded Sale" }));
+        stats.unmatchedExpenses.forEach(l => combined.push({ ...l, type: 'missing_expense', date: l.createdAt, description: "Unrecorded Expense" }));
+    }
+
+    return combined.sort((a, b) => b.date.seconds - a.date.seconds);
+  };*/
+
+   // --- MERGE LISTS FOR TABLE DISPLAY ---
+  const getDisplayData = () => {
+    const combined = [];
+
+    // =========================================================
+    // 1. PROCESS SALES & JOBS (Money In - App Side)
+    // =========================================================
+    if (activeTab === 'all' || activeTab === 'sales' || activeTab === 'paybill') {
+        
+        // --- A. Process Sales (Direct Payments) ---
+        sales.forEach(s => {
+            const method = (s.paymentMethod || "").toLowerCase();
+            const isPaybill = method.includes('paybill') || method.includes('till') || method.includes('buy goods');
+
+            // FILTER: If tab is 'paybill', ONLY show paybill items
+            if (activeTab === 'paybill' && !isPaybill) return;
+
+            // FILTER: If tab is 'sales', HIDE paybill items (show only Personal M-Pesa/Bank/Cash)
+            if (activeTab === 'sales' && isPaybill) return;
+
+            combined.push({ 
+                ...s, 
+                type: 'sale', 
+                date: s.createdAt 
+            });
+        });
+
+        // --- B. Process Jobs (Account Deposits) ---
+        jobs.filter(j => j.paidAmount > 0).forEach(j => {
+            const method = (j.paymentMethod || "cash").toLowerCase();
+            const isPaybill = method.includes('paybill') || method.includes('till') || method.includes('buy goods');
+
+            // FILTER: If tab is 'paybill', ONLY show paybill items
+            if (activeTab === 'paybill' && !isPaybill) return;
+
+            // FILTER: If tab is 'sales', HIDE paybill items
+            if (activeTab === 'sales' && isPaybill) return;
+
+            combined.push({ 
+                ...j, 
+                type: 'job', 
+                amount: j.paidAmount, 
+                date: j.createdAt 
+            });
+        });
+    }
+
+    // =========================================================
+    // 2. PROCESS EXPENSES (Money Out - App Side)
+    // =========================================================
+    if (activeTab === 'all' || activeTab === 'expenses') {
+        expenses.forEach(e => {
+            combined.push({ 
+                ...e, 
+                type: 'app_expense', 
+                date: e.createdAt 
+            });
+        });
+    }
+
+    // =========================================================
+    // 3. PROCESS PAYBILL LOGS (Money In - SMS Side)
+    // =========================================================
+    // This shows the raw SMS log for paybill so you can compare with App Sales
+    if (activeTab === 'all' || activeTab === 'paybill') {
+        logs.filter(l => l.type === 'paybill_sale').forEach(l => {
+            combined.push({ 
+                ...l, 
+                type: 'paybill_log', 
+                date: l.createdAt, 
+                description: "Paybill Income (SMS)" 
+            });
+        });
+    }
+
+    // =========================================================
+    // 4. PROCESS FLOAT / SYSTEM LOGS (Internal - SMS Side)
+    // =========================================================
+    if (activeTab === 'all' || activeTab === 'float') {
+        logs.filter(l => l.category === 'float_in').forEach(l => {
+            combined.push({ 
+                ...l, 
+                type: 'float_log', 
+                date: l.createdAt, 
+                description: "Float Deposit / B2C" 
+            });
+        });
+    }
+
+    // =========================================================
+    // 5. PROCESS UNMATCHED (Discrepancies)
+    // =========================================================
+    if (activeTab === 'unmatched') {
+        // Missing Sales (Money received but no App record)
+        stats.unmatchedLogs.forEach(l => {
+            combined.push({ 
+                ...l, 
+                type: 'missing_sale', 
+                date: l.createdAt, 
+                description: "Unrecorded Sale" 
+            });
+        });
+
+        // Missing Expenses (Money sent but no App record)
+        stats.unmatchedExpenses.forEach(l => {
+            combined.push({ 
+                ...l, 
+                type: 'missing_expense', 
+                date: l.createdAt, 
+                description: "Unrecorded Expense" 
+            });
+        });
+    }
+
+    // =========================================================
+    // 6. SORT BY DATE (Newest First)
+    // =========================================================
+    return combined.sort((a, b) => b.date.seconds - a.date.seconds);
+  };
+
+  const displayData = getDisplayData();
+
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 text-slate-400">
+        <Loader2 className="animate-spin mb-4" size={48} />
+        <p className="font-bold tracking-widest text-xs uppercase">Reconciling Accounts...</p>
+      </div>
+    );
+  }
+
+  // --- MODAL COMPONENT ---
+  const TransactionModal = () => {
+    if (!selectedTransaction) return null;
+
+    const { type, category, saleType, receiptText, items } = selectedTransaction;
+    
+    // 1. Determine Color Scheme
+    const isExpense = type.includes('expense');
+    const isFloat = type.includes('float');
+    const isJob = type === 'job' || saleType === 'job';
+    
+    let headerColor = 'bg-slate-900';
+    if(isExpense) headerColor = 'bg-orange-600';
+    if(isFloat) headerColor = 'bg-blue-600';
+    if(isJob) headerColor = 'bg-purple-700';
+
+    // 2. Determine Who Recorded It
+    const recordedBy = selectedTransaction.attendantName || 
+                       selectedTransaction.userName || 
+                       selectedTransaction.createdBy || 
+                       "System Auto-Sync";
+
+    return (
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in duration-200">
+          
+          {/* HEADER */}
+          <div className={`p-6 flex justify-between items-center text-white ${headerColor}`}>
+            <div>
+              <h3 className="font-bold text-lg">
+                  {isExpense ? "Expense Details" : isFloat ? "Float / Transfer" : "Sale Details"}
+              </h3>
+              <p className="text-xs opacity-80 uppercase tracking-widest mt-1">
+                  {selectedTransaction.transactionCode || "NO REF"}
+              </p>
+            </div>
+            <button onClick={() => setSelectedTransaction(null)} className="p-2 bg-black/20 rounded-full hover:bg-black/40"><X size={20} /></button>
+          </div>
+
+          {/* BODY */}
+          <div className="p-6 overflow-y-auto bg-slate-50 flex-1">
+             
+             {/* MAIN CARD */}
+             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-4">
+                 <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Description / Sender</p>
+                 <p className="text-lg font-black text-slate-800">
+                    {selectedTransaction.description || selectedTransaction.jobName || selectedTransaction.sender || "N/A"}
+                 </p>
+                 <div className="mt-3 flex justify-between items-end border-t border-slate-100 pt-2">
+                    <div>
+                        <p className="text-[10px] text-slate-400 font-bold uppercase">Recorded By</p>
+                        <p className="font-bold text-slate-700">{recordedBy}</p>
+                    </div>
+                    <div>
+                        <p className="text-[10px] text-slate-400 font-bold uppercase text-right">Date</p>
+                        <p className="font-bold text-slate-700 text-xs">
+                            {selectedTransaction.createdAt?.toDate ? selectedTransaction.createdAt.toDate().toLocaleString() : "N/A"}
+                        </p>
+                    </div>
+                 </div>
+             </div>
+
+             {/* ITEMS LIST (If Retail Sale) */}
+             {items && items.length > 0 && (
+                <div className="mb-4">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Items Sold</h4>
+                    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                        <table className="w-full text-left text-xs">
+                            <thead className="bg-slate-100 text-slate-500 font-bold">
+                                <tr><th className="p-2">Item</th><th className="p-2 text-right">Qty</th><th className="p-2 text-right">Price</th></tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {items.map((i, idx) => (
+                                    <tr key={idx}>
+                                        <td className="p-2">{i.name}</td>
+                                        <td className="p-2 text-right">{i.qty}</td>
+                                        <td className="p-2 text-right">{i.price}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+             )}
+
+             {/* RECEIPT PREVIEW (Restored) */}
+             {receiptText && (
+                <div>
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Receipt Preview</h4>
+                    <div className="bg-slate-100 border border-slate-200 p-4 rounded-xl font-mono text-[10px] text-slate-600 whitespace-pre-wrap leading-relaxed select-text shadow-inner">
+                        {receiptText}
+                    </div>
+                </div>
+             )}
+
+             {/* Raw Data (Hidden details for Float/Logs) */}
+             {!receiptText && !items && (
+                 <div className="bg-blue-50 p-4 rounded-xl text-xs text-blue-800 font-medium">
+                    This is a raw transaction log. No app receipt was generated for this entry.
+                 </div>
+             )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const AuditCard = ({ title, icon: Icon, sms, app, diff, color, subtitle }) => (
+    <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-lg flex-1 min-w-[250px]">
+      <div className="flex justify-between mb-4">
+        <div className={`p-3 rounded-xl ${color.bg} ${color.text}`}><Icon size={24} /></div>
+        <div className="text-right">
+          <p className="text-[10px] uppercase font-black text-slate-400 tracking-widest">{title}</p>
+          <p className={`text-2xl font-black ${diff > 0 ? 'text-rose-500' : diff < 0 ? 'text-orange-500' : 'text-emerald-500'}`}>
+            {diff === 0 ? "BALANCED" : `${diff > 0 ? "MISSING" : "SURPLUS"} ${Math.abs(diff).toLocaleString()}`}
+          </p>
+        </div>
+      </div>
+      <div className="space-y-2 text-sm">
+        <div className="flex justify-between text-slate-500 font-medium">
+          <span>{subtitle || "SMS Logs"}:</span>
+          <span className="text-slate-900 font-bold">{sms.toLocaleString()}</span>
+        </div>
+        <div className="flex justify-between text-slate-500 font-medium">
+          <span>App Entries:</span>
+          <span className="text-slate-900 font-bold">{app.toLocaleString()}</span>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="p-6 bg-slate-50 min-h-screen relative">
+      <TransactionModal />
+
+      {/* HEADER */}
+      <div className="flex flex-col md:flex-row justify-between items-end mb-6 gap-4">
+        <div>
+          <h2 className="text-3xl font-black text-slate-900 tracking-tighter">Reconciliation</h2>
+          <p className="text-slate-400 font-medium">Daily Audit & Cash Flow</p>
+        </div>
+        <div className="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border shadow-sm">
+          <Calendar size={18} className="text-blue-600" />
+          <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="outline-none text-sm font-bold text-slate-700 bg-transparent" />
+        </div>
+      </div>
+
+      <StatementUpload businessId={businessId} />
+
+      {/* 1. AUDIT CARDS ROW */}
+      <div className="flex flex-wrap gap-4 mb-8 mt-6">
+        <AuditCard title="M-Pesa Sales" icon={Smartphone} sms={stats.smsMpesa} app={stats.appMpesa} diff={mpesaDiff} color={{ bg: 'bg-emerald-100', text: 'text-emerald-600' }} />
+        <AuditCard title="Bank Sales" icon={Landmark} sms={stats.smsBank} app={stats.appBank} diff={bankDiff} color={{ bg: 'bg-indigo-100', text: 'text-indigo-600' }} />
+        <AuditCard title="Digital Expenses" icon={Truck} sms={stats.smsExpenses} app={stats.expDigital} diff={expenseDiff} color={{ bg: 'bg-orange-100', text: 'text-orange-600' }} />
+        <AuditCard title="Paybill / Till" icon={Receipt} sms={stats.smsPaybill} app={stats.appPaybill} diff={paybillDiff} color={{ bg: 'bg-purple-100', text: 'text-purple-600' }} subtitle="Utility SMS" />
+        
+        {/* FLOAT CARD (New) */}
+        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-lg flex-1 min-w-[250px]">
+           <div className="flex justify-between mb-4">
+              <div className="p-3 rounded-xl bg-blue-100 text-blue-600"><ArrowRightLeft size={24} /></div>
+              <div className="text-right">
+                  <p className="text-[10px] uppercase font-black text-slate-400 tracking-widest">FLOAT / B2C</p>
+                  <p className="text-2xl font-black text-blue-600">{stats.smsFloat.toLocaleString()}</p>
+              </div>
+           </div>
+           <p className="text-xs text-slate-400 text-right">Internal money movement (Not Sales)</p>
+        </div>
+      </div>
+
+      {/* 2. WARNING BANNER */}
+      {(stats.unmatchedLogs.length > 0 || stats.unmatchedExpenses.length > 0) && (
+        <div className="mb-6 bg-rose-50 border-l-4 border-rose-500 p-4 rounded-r-xl shadow-sm flex items-center justify-between">
+          <div className="flex items-center gap-4">
+             <div className="bg-rose-500 p-2 rounded-full text-white"><AlertCircle size={20} /></div>
+             <div>
+                <h4 className="font-bold text-rose-900">Discrepancies Found</h4>
+                <p className="text-xs text-rose-800">
+                    {stats.unmatchedLogs.length} Missing Sales &bull; {stats.unmatchedExpenses.length} Missing Expenses
+                </p>
+             </div>
+          </div>
+          <button onClick={() => setActiveTab('unmatched')} className="px-4 py-2 bg-rose-600 text-white text-xs font-bold rounded-lg shadow-sm hover:bg-rose-700">Review Now</button>
+        </div>
+      )}
+
+      {/* 3. TABS NAVIGATION */}
+      <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
+        {['all', 'sales', 'paybill', 'expenses', 'float', 'unmatched'].map(tab => (
+            <button 
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`px-5 py-2.5 rounded-full text-xs font-black uppercase tracking-wider transition-all whitespace-nowrap ${activeTab === tab ? 'bg-slate-900 text-white shadow-lg' : 'bg-white text-slate-500 hover:bg-slate-100'}`}
+            >
+                {tab}
+            </button>
+        ))}
+      </div>
+
+      {/* 4. DATA TABLE */}
+      <div className="bg-white rounded-[2rem] shadow-xl border border-slate-200 overflow-hidden min-h-[400px]">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="bg-slate-50 text-slate-400 text-[10px] uppercase tracking-[0.2em] font-black border-b border-slate-100">
+              <th className="p-5">Type</th>
+              <th className="p-5">Reference</th>
+              <th className="p-5">Description</th>
+              <th className="p-5">Amount</th>
+              <th className="p-5 text-right">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-50">
+            {displayData.length === 0 ? (
+                <tr><td colSpan="5" className="p-10 text-center text-slate-400 font-bold">No records found for this view.</td></tr>
+            ) : (
+                displayData.map((item, idx) => {
+                    // Logic to find matching log if it's a sale
+                    const itemCode = (item.transactionCode || "").toUpperCase();
+                    const amount = Number(item.amount || item.paidAmount || 0);
+                    
+                    let statusColor = "bg-slate-100 text-slate-500";
+                    let statusText = "Recorded";
+
+                    if (item.type === 'missing_sale' || item.type === 'missing_expense') {
+                        statusColor = "bg-rose-100 text-rose-600";
+                        statusText = "MISSING";
+                    } else if (item.type === 'float_log') {
+                        statusColor = "bg-blue-100 text-blue-600";
+                        statusText = "FLOAT";
+                    } else if (item.paymentMethod === 'cash') {
+                         statusColor = "bg-emerald-100 text-emerald-600";
+                         statusText = "CASH";
+                    } else {
+                         // Check verification
+                         const hasLog = logs.some(l => (l.transactionCode || "").toUpperCase() === itemCode && Number(l.amount) === amount);
+                         if(hasLog) { statusColor = "bg-emerald-100 text-emerald-600"; statusText = "VERIFIED"; }
+                    }
+
+                    const recordedBy = item.attendantName || item.userName || item.createdBy || "System";
+
+return (
+    <tr key={`${item.id}-${idx}`} onClick={() => setSelectedTransaction(item)} className="hover:bg-slate-50 cursor-pointer transition-colors group">
+       <td className="p-5">
+            <div className="flex items-center gap-3">
+                <div className={`p-2 rounded-lg ${
+                    item.type.includes('expense') ? 'bg-orange-100 text-orange-600' : 
+                    item.type.includes('float') ? 'bg-blue-100 text-blue-600' : 
+                    'bg-slate-100 text-slate-600'
+                }`}>
+                    {item.type.includes('expense') ? <Briefcase size={16} /> : 
+                     item.type.includes('float') ? <ArrowRightLeft size={16} /> : 
+                     <Receipt size={16} />}
+                </div>
+                <div>
+                     <span className="block text-xs font-bold uppercase text-slate-500">{item.type.replace('_', ' ')}</span>
+                     {/* ADDED ATTENDANT NAME HERE */}
+                     <span className="text-[10px] font-semibold text-slate-400">By: {recordedBy}</span>
+                </div>
+            </div>
+       </td>
+                           <td className="p-5 font-mono text-xs font-bold text-slate-600">{item.transactionCode || "---"}</td>
+                           <td className="p-5 text-sm font-bold text-slate-800">{item.description || item.jobName || item.sender || "N/A"}</td>
+                           <td className={`p-5 font-black text-sm ${item.type.includes('expense') ? 'text-orange-600' : 'text-slate-900'}`}>
+                               KES {amount.toLocaleString()}
+                           </td>
+                           <td className="p-5 text-right">
+                               <span className={`px-3 py-1 rounded-md text-[10px] font-black uppercase ${statusColor}`}>{statusText}</span>
+                           </td>
+                        </tr>
+                    );
+                })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*import React, { useState, useEffect, useCallback } from "react";
+import { collection, query, where, getDocs, Timestamp } from "firebase/firestore";
+import { db } from "../firebase";
+import { 
+  AlertCircle, 
+  CheckCircle,
+  Smartphone, 
+  Landmark,   
+  Calendar,
+  TrendingDown,
+  TrendingUp,
+  Wallet,
+  Receipt,
+  X,
+  Eye,
+  Truck,
+  Loader2,
   Briefcase
 } from "lucide-react";
 import StatementUpload from "../components/StatementUpload";
@@ -168,7 +847,7 @@ else {
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
         <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in duration-200">
           
-          {/* HEADER */}
+          {/* HEADER *//*
           <div className={`p-6 flex justify-between items-center text-white ${isExpense ? 'bg-orange-600' : 'bg-slate-900'}`}>
             <div>
               <h3 className="font-bold text-lg">{isExpense ? 'Expense Details' : 'Transaction Details'}</h3>
@@ -182,10 +861,10 @@ else {
             <button onClick={() => setSelectedTransaction(null)} className="p-2 bg-black/20 rounded-full hover:bg-black/40 transition-colors"><X size={20} /></button>
           </div>
 
-          {/* BODY */}
+          {/* BODY *//*
           <div className="p-6 overflow-y-auto bg-slate-50 flex-1 space-y-6">
             
-            {/* CONTEXT CARD */}
+            {/* CONTEXT CARD *//*
             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
               <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">
                 {isExpense ? 'Expense Description' : (saleType === 'job' ? 'Job Description' : 'Customer / Reference')}
@@ -201,7 +880,7 @@ else {
               )}
             </div>
 
-            {/* EXPENSE DETAILS (Only for Expenses) */}
+            {/* EXPENSE DETAILS (Only for Expenses) *//*
             {isExpense && (
                 <div className="flex gap-4">
                     <div className="flex-1 bg-white p-4 rounded-xl border border-slate-200">
@@ -215,7 +894,7 @@ else {
                 </div>
             )}
 
-            {/* ITEMS TABLE (Only for Sales) */}
+            {/* ITEMS TABLE (Only for Sales) *//*
             {hasItems && (
               <div>
                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Items Sold</h4>
@@ -239,7 +918,7 @@ else {
               </div>
             )}
 
-            {/* RECEIPT PREVIEW (Only for Sales if exists) */}
+            {/* RECEIPT PREVIEW (Only for Sales if exists) *//*
             {receiptText && (
                 <div>
                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Official Receipt Preview</h4>
@@ -250,7 +929,7 @@ else {
             )}
           </div>
 
-          {/* FOOTER */}
+          {/* FOOTER *//*
           <div className="p-6 border-t border-slate-100 bg-white">
             <div className="flex justify-between items-center">
               <span className="text-sm font-bold text-slate-500">Total Amount</span>
@@ -295,10 +974,10 @@ else {
   return (
     <div className="p-8 bg-slate-50 min-h-screen relative">
       
-      {/* --- ADDED: RENDER THE MODAL HERE --- */}
+      {/* --- ADDED: RENDER THE MODAL HERE --- *//*
       <TransactionModal />
 
-      {/* HEADER SECTION */}
+      {/* HEADER SECTION *//*
       <div className="flex flex-col md:flex-row justify-between items-end mb-8 gap-4">
         <div>
           <h2 className="text-4xl font-black text-slate-900 tracking-tighter">Reconciliation</h2>
@@ -312,14 +991,14 @@ else {
 
       <StatementUpload businessId={businessId} />
 
-      {/* 1. AUDIT ROW */}
+      {/* 1. AUDIT ROW *//*
       <div className="flex flex-wrap gap-6 mb-8 mt-8">
         <AuditCard title="M-Pesa" icon={Smartphone} sms={stats.smsMpesa} app={stats.appMpesa} diff={mpesaDiff} color={{ bg: 'bg-emerald-100', text: 'text-emerald-600' }} />
         <AuditCard title="Bank & Sacco" icon={Landmark} sms={stats.smsBank} app={stats.appBank} diff={bankDiff} color={{ bg: 'bg-indigo-100', text: 'text-indigo-600' }} />
         <AuditCard title="Digital Expenses" icon={Truck} sms={stats.smsExpenses} app={stats.expMpesa + stats.expBank} diff={expenseDiff} color={{ bg: 'bg-orange-100', text: 'text-orange-600' }} subtitle="SMS (Paid Out)" />
       </div>
 
-      {/* 2. CASH FLOW ROW */}
+      {/* 2. CASH FLOW ROW *//*
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
         <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
           <div className="flex items-center gap-2 mb-2 text-slate-400"><TrendingUp size={18} className="text-emerald-500" /><span className="text-xs font-black uppercase tracking-widest">Cash Sales (Drawer)</span></div>
@@ -335,7 +1014,7 @@ else {
         </div>
       </div>
 
-      {/* 3. WARNING BANNER */}
+      {/* 3. WARNING BANNER *//*
       {stats.unmatchedLogs.length > 0 && (
         <div className="mb-6 bg-amber-50 border-l-8 border-amber-500 p-6 rounded-r-2xl shadow-sm flex items-start gap-5">
           <div className="bg-amber-500 p-3 rounded-xl text-white shadow-lg"><AlertCircle size={28} /></div>
@@ -346,7 +1025,7 @@ else {
         </div>
       )}
 
-      {/* 4. DETAILED TABLE */}
+      {/* 4. DETAILED TABLE *//*
       <div className="bg-white rounded-[2rem] shadow-2xl border border-slate-200 overflow-hidden">
         <table className="w-full text-left border-collapse">
           <thead>
@@ -362,7 +1041,7 @@ else {
           </thead>
           <tbody className="divide-y divide-slate-100">
             
-            {/* A. UNMATCHED LOGS */}
+            {/* A. UNMATCHED LOGS *//*
             {stats.unmatchedLogs.map((log, idx) => (
               <tr key={`ghost-${idx}`} className="bg-rose-50/50 hover:bg-rose-100/50 transition-colors">
                 <td className="p-6 flex items-center gap-4">
@@ -384,7 +1063,7 @@ else {
               </tr>
             ))}
 
-            {/* B. SALES (INCOME) */}
+            {/* B. SALES (INCOME) *//*
             {sales.map(sale => {
               const actualLog = logs.find(log => (log.transactionCode || "").toUpperCase() === (sale.transactionCode || "").toUpperCase() && log.category === 'income');
               const isMatched = actualLog && Number(actualLog.amount) === Number(sale.amount);
@@ -409,7 +1088,7 @@ else {
               );
             })}
 
-            {/* C. EXPENSES (MONEY OUT) - ADDED CLICK HANDLER */}
+            {/* C. EXPENSES (MONEY OUT) - ADDED CLICK HANDLER *//*
             {expenses.map(exp => (
               <tr 
                 key={exp.id} 
@@ -456,7 +1135,7 @@ else {
     </div>
   );
 }
-
+*/
 
 
 
@@ -1318,704 +1997,3 @@ export default function Reconciliation({ businessId }) {
   );
 }*/
 
-
-
-
-
-
-
-
-
-
-
-
-
-/*import React, { useState, useEffect } from "react";
-import { collection, query, where, getDocs, Timestamp } from "firebase/firestore";
-import { db } from "../firebase";
-import { 
-  AlertCircle, 
-  CheckCircle, 
-  Info, 
-  Smartphone, // M-Pesa Icon
-  Landmark,   // Bank Icon
-  Receipt, 
-  Calendar,
-  TrendingDown,
-  ArrowRight
-} from "lucide-react";
-import StatementUpload from "../components/StatementUpload";
-
-export default function Reconciliation({ businessId }) {
-  const [sales, setSales] = useState([]);
-  const [logs, setLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  // Default to Today's date
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
-
-  useEffect(() => {
-    if (!businessId) return;
-
-    const fetchData = async () => {
-      setLoading(true);
-      const [year, month, day] = selectedDate.split('-').map(Number);
-      
-      const start = new Date(year, month - 1, day, 0, 0, 0);
-      const end = new Date(year, month - 1, day, 23, 59, 59, 999);
-
-      try {
-        // 1. Fetch Sales (App)
-        const salesQ = query(
-          collection(db, "payments"), 
-          where("businessId", "==", businessId),
-          where("createdAt", ">=", Timestamp.fromDate(start)),
-          where("createdAt", "<=", Timestamp.fromDate(end))
-        );
-
-        // 2. Fetch Logs (SMS/Bank)
-        const logsQ = query(
-          collection(db, "mpesa_logs"), 
-          where("businessId", "==", businessId),
-          where("receivedAt", ">=", Timestamp.fromDate(start)),
-          where("receivedAt", "<=", Timestamp.fromDate(end))
-        );
-
-        const [salesSnap, logsSnap] = await Promise.all([getDocs(salesQ), getDocs(logsQ)]);
-        
-        setSales(salesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-        setLogs(logsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-        
-      } catch (error) {
-        console.error("Query Error:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchData();
-  }, [businessId, selectedDate]);
-
-  // --- CALCULATION LOGIC ---
-
-  // 1. Calculate Totals based on SOURCE (Bank vs Mpesa)
-  const actualMpesaTotal = logs.filter(l => l.type !== 'bank').reduce((sum, l) => sum + Number(l.amount || 0), 0);
-  const actualBankTotal = logs.filter(l => l.type === 'bank').reduce((sum, l) => sum + Number(l.amount || 0), 0);
-  const totalActual = actualMpesaTotal + actualBankTotal;
-
-  // 2. Verified Sales (Matches found)
-  const verifiedSales = sales.filter(s => {
-    return logs.some(l => 
-      l.transactionCode?.toUpperCase() === s.transactionCode?.toUpperCase() &&
-      Number(l.amount) === Number(s.amount)
-    );
-  });
-  const totalVerified = verifiedSales.reduce((sum, s) => sum + Number(s.amount || 0), 0);
-
-  // 3. Discrepancy
-  const discrepancy = totalActual - totalVerified;
-
-  // 4. Ghost Money (Logs with no matching sale)
-  const unmatchedLogs = logs.filter(log => 
-    !sales.some(sale => 
-      sale.transactionCode?.toUpperCase() === log.transactionCode?.toUpperCase() &&
-      Number(sale.amount) === Number(log.amount)
-    )
-  );
-
-  if (loading) return (
-    <div className="p-20 text-center flex flex-col items-center gap-4">
-      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium tracking-tight">Syncing with Bank Logs...</p>
-    </div>
-  );
-
-  return (
-    <div className="p-8 bg-slate-50 min-h-screen font-sans">
-      
-      {/* HEADER & DATE *//*
-      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end mb-8 gap-6">
-        <div>
-          <h2 className="text-4xl font-black text-slate-900 tracking-tighter mb-2">Reconciliation Engine</h2>
-          <div className="flex items-center gap-4">
-            <p className="text-slate-500 font-medium">Business ID: <span className="text-slate-800 font-bold">{businessId}</span></p>
-            <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm transition-all hover:border-blue-400">
-              <Calendar size={16} className="text-blue-600" />
-              <input 
-                type="date" 
-                value={selectedDate} 
-                onChange={(e) => setSelectedDate(e.target.value)}
-                className="outline-none text-sm font-bold text-slate-700 bg-transparent"
-              />
-            </div>
-          </div>
-        </div>
-        
-        {/* SUMMARY CARDS *//*
-        <div className="flex flex-wrap gap-4">
-          {/* M-Pesa Total *//*
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm min-w-[140px]">
-            <div className="flex items-center gap-2 mb-1">
-              <Smartphone size={14} className="text-emerald-500"/>
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">M-Pesa SMS</p>
-            </div>
-            <p className="text-2xl font-black text-slate-800 font-mono">KES {actualMpesaTotal.toLocaleString()}</p>
-          </div>
-
-          {/* Bank Total *//*
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm min-w-[140px]">
-            <div className="flex items-center gap-2 mb-1">
-              <Landmark size={14} className="text-indigo-500"/>
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bank SMS</p>
-            </div>
-            <p className="text-2xl font-black text-slate-800 font-mono">KES {actualBankTotal.toLocaleString()}</p>
-          </div>
-
-          {/* Discrepancy Card *//*
-          <div className={`p-5 rounded-2xl border shadow-md min-w-[180px] transition-all ${discrepancy > 0 ? 'bg-rose-600 border-rose-700' : 'bg-emerald-50 border-emerald-200'}`}>
-            <div className="flex items-center justify-between mb-1">
-              <p className={`text-[10px] font-black uppercase tracking-widest ${discrepancy > 0 ? 'text-rose-100' : 'text-emerald-600'}`}>Unaccounted</p>
-              {discrepancy > 0 && <TrendingDown size={14} className="text-white animate-bounce" />}
-            </div>
-            <p className={`text-2xl font-black font-mono ${discrepancy > 0 ? 'text-white' : 'text-emerald-700'}`}>
-              KES {discrepancy.toLocaleString()}
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div className="mb-8">
-        <StatementUpload businessId={businessId} />
-      </div>
-
-      {/* WARNING BANNER *//*
-      {unmatchedLogs.length > 0 && (
-        <div className="mb-6 bg-amber-50 border-l-8 border-amber-500 p-6 rounded-r-2xl shadow-sm flex items-start gap-5">
-          <div className="bg-amber-500 p-3 rounded-xl text-white shadow-lg">
-            <AlertCircle size={28} />
-          </div>
-          <div>
-            <h4 className="font-black text-amber-900 text-lg">Attention: {unmatchedLogs.length} Unclaimed Transactions</h4>
-            <p className="text-amber-800 opacity-90 leading-relaxed font-medium">
-              We found money in your logs (Bank/M-Pesa) that was not recorded as a sale in the app.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* TABLE *//*
-      <div className="bg-white rounded-[2rem] shadow-2xl border border-slate-200 overflow-hidden">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-slate-900 text-slate-400 text-[10px] uppercase tracking-[0.2em] font-black">
-              <th className="p-6">Source</th>
-              <th className="p-6">Transaction Code</th>
-              <th className="p-6">App Amount</th>
-              <th className="p-6">Bank/SMS Amount</th>
-              <th className="p-6">Status</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            
-            {/* 1. UNMATCHED LOGS (Ghost Money) *//*
-            {unmatchedLogs.map((log, idx) => (
-              <tr key={`ghost-${idx}`} className="bg-rose-50/50 hover:bg-rose-100/50 transition-colors">
-                <td className="p-6 flex items-center gap-4">
-                  <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shadow-inner ${log.type === 'bank' ? 'bg-indigo-100 text-indigo-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                    {log.type === 'bank' ? <Landmark size={20} /> : <Smartphone size={20} />}
-                  </div>
-                  <div>
-                    <p className="font-black text-slate-800 text-sm">{log.type === 'bank' ? 'BANK' : 'M-PESA'}</p>
-                    <p className="text-[10px] text-rose-500 font-bold uppercase tracking-widest">Missing Sale</p>
-                  </div>
-                </td>
-                <td className="p-6 font-mono text-xs font-black text-rose-800">{log.transactionCode}</td>
-                <td className="p-6 text-slate-300 font-bold">---</td>
-                <td className="p-6 font-black text-rose-700">KES {Number(log.amount).toLocaleString()}</td>
-                <td className="p-6">
-                  <span className="bg-rose-600 text-white px-4 py-1.5 rounded-full text-[10px] font-black uppercase shadow-sm">UNCLAIMED</span>
-                </td>
-              </tr>
-            ))}
-
-            {/* 2. APP SALES RECORDS *//*
-            {sales.map(sale => {
-              const actualLog = logs.find(log => 
-                log.transactionCode?.toUpperCase() === sale.transactionCode?.toUpperCase()
-              );
-              
-              const isMatched = actualLog && Number(actualLog.amount) === Number(sale.amount);
-              const isMismatch = actualLog && Number(actualLog.amount) !== Number(sale.amount);
-              const isFakeCode = (sale.paymentMethod === 'mpesa' || sale.paymentMethod === 'bank') && !actualLog;
-
-              return (
-                <tr key={sale.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="p-6 flex items-center gap-4">
-                    <div className="w-10 h-10 bg-slate-100 text-slate-500 rounded-2xl flex items-center justify-center">
-                      <Receipt size={20} />
-                    </div>
-                    <div>
-                      <p className="font-black text-slate-800 text-sm">{sale.attendantName || "Staff App"}</p>
-                      <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">
-                        {sale.paymentMethod || 'CASH'}
-                      </p>
-                    </div>
-                  </td>
-                  <td className="p-6 font-mono text-xs text-slate-500 font-semibold">{sale.transactionCode || "---"}</td>
-                  <td className="p-6 font-black text-slate-900">KES {Number(sale.amount).toLocaleString()}</td>
-                  <td className={`p-6 font-black ${isMismatch ? 'text-rose-600 underline' : 'text-slate-500'}`}>
-                    {actualLog ? `KES ${Number(actualLog.amount).toLocaleString()}` : "--"}
-                  </td>
-                  <td className="p-6">
-                    {isMatched ? (
-                      <div className="flex items-center gap-2 text-emerald-600 bg-emerald-100/50 w-fit px-3 py-1.5 rounded-lg border border-emerald-200">
-                        <CheckCircle size={16} />
-                        <span className="text-[10px] font-black uppercase">Verified</span>
-                      </div>
-                    ) : isMismatch ? (
-                      <div className="flex items-center gap-2 text-amber-600 bg-amber-100/50 w-fit px-3 py-1.5 rounded-lg border border-amber-200">
-                        <AlertCircle size={16} />
-                        <span className="text-[10px] font-black uppercase">Amount Diff</span>
-                      </div>
-                    ) : isFakeCode ? (
-                      <div className="flex items-center gap-2 text-rose-600 bg-rose-100/50 w-fit px-3 py-1.5 rounded-lg border border-rose-200 animate-pulse">
-                        <AlertCircle size={16} />
-                        <span className="text-[10px] font-black uppercase">No Log Found</span>
-                      </div>
-                    ) : (
-                      <span className="text-slate-400 font-black text-[10px] uppercase tracking-widest bg-slate-100 px-3 py-1.5 rounded-lg">
-                        Cash / Unverifiable
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}*/
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/*import React, { useState, useEffect } from "react";
-import { collection, query, where, getDocs, Timestamp } from "firebase/firestore";
-import { db } from "../firebase";
-import { 
-  AlertCircle, 
-  CheckCircle, 
-  Info, 
-  Smartphone, 
-  Receipt, 
-  Calendar,
-  TrendingDown,
-  Search
-} from "lucide-react";
-import StatementUpload from "../components/StatementUpload";
-
-export default function Reconciliation({ businessId }) {
-  const [sales, setSales] = useState([]);
-  const [mpesaLogs, setMpesaLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  // 1. DATE STATE: Default to Today's date (local time)
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
-
-  useEffect(() => {
-    if (!businessId) return;
-
-    const fetchData = async () => {
-  if (!businessId) {
-    console.log("❌ Error: businessId is missing");
-    return;
-  }
-  
-  setLoading(true);
-
-  // Parse YYYY-MM-DD manually to avoid timezone shifting
-  const [year, month, day] = selectedDate.split('-').map(Number);
-  
-  // Create dates in LOCAL TIME (Kenya Time)
-  const start = new Date(year, month - 1, day, 0, 0, 0);
-  const end = new Date(year, month - 1, day, 23, 59, 59, 999);
-
-  console.log("🔍 Fetching for:", selectedDate);
-  console.log("🔍 Search Range:", start.toLocaleString(), "to", end.toLocaleString());
-  console.log("🔍 BusinessID:", businessId);
-
-  try {
-    const salesQ = query(
-      collection(db, "payments"), 
-      where("businessId", "==", businessId),
-      where("createdAt", ">=", Timestamp.fromDate(start)),
-      where("createdAt", "<=", Timestamp.fromDate(end))
-    );
-
-    const mpesaQ = query(
-      collection(db, "mpesa_logs"), 
-      where("businessId", "==", businessId),
-      where("receivedAt", ">=", Timestamp.fromDate(start)),
-      where("receivedAt", "<=", Timestamp.fromDate(end))
-    );
-
-    const [salesSnap, mpesaSnap] = await Promise.all([getDocs(salesQ), getDocs(mpesaQ)]);
-    
-    console.log("✅ Results Found - Sales:", salesSnap.size, " | Logs:", mpesaSnap.size);
-
-    setSales(salesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    setMpesaLogs(mpesaSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    
-  } catch (error) {
-    console.error("🔥 Firestore Query Error:", error);
-    // If you see a "The query requires an index" error here, click the link in the console!
-  } finally {
-    setLoading(false);
-  }
-};
-
-    fetchData();
-  }, [businessId, selectedDate]);
-
-  // --- RECONCILIATION LOGIC ---
-
-  // 1. Total Money confirmed by SMS/Bank
-  const totalActualMpesa = mpesaLogs.reduce((sum, l) => sum + Number(l.amount || 0), 0);
-
-  // 2. Total Money verified by Staff in the App (Code + Amount must match bank)
-  const totalVerifiedMpesa = sales.reduce((sum, s) => {
-    const matchingLog = mpesaLogs.find(log => 
-      log.transactionCode?.toUpperCase() === s.transactionCode?.toUpperCase() &&
-      Number(log.amount) === Number(s.amount)
-    );
-    return matchingLog ? sum + Number(s.amount || 0) : sum;
-  }, 0);
-
-  // 3. The GAP (Money received by bank but not correctly recorded in app)
-  const totalMissingMoney = totalActualMpesa - totalVerifiedMpesa;
-
-  // 4. Identify GHOST MONEY (M-Pesa logs that have no matching sale at all)
-  const unmatchedLogs = mpesaLogs.filter(log => 
-    !sales.some(sale => 
-      sale.transactionCode?.toUpperCase() === log.transactionCode?.toUpperCase() &&
-      Number(sale.amount) === Number(log.amount)
-    )
-  );
-
-  if (loading) return (
-    <div className="p-20 text-center flex flex-col items-center gap-4">
-      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium tracking-tight">Syncing with Bank Logs...</p>
-    </div>
-  );
-
-  return (
-    <div className="p-8 bg-slate-50 min-h-screen font-sans">
-      {/* HEADER SECTION *//*
-      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end mb-8 gap-6">
-        <div>
-          <h2 className="text-4xl font-black text-slate-900 tracking-tighter mb-2">Reconciliation Engine</h2>
-          <div className="flex items-center gap-4">
-            <p className="text-slate-500 font-medium">Auditing Daily Logs for Business ID: <span className="text-slate-800 font-bold">{businessId}</span></p>
-            
-            {/* DATE PICKER *//*
-            <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm transition-all hover:border-blue-400">
-              <Calendar size={16} className="text-blue-600" />
-              <input 
-                type="date" 
-                value={selectedDate} 
-                onChange={(e) => setSelectedDate(e.target.value)}
-                className="outline-none text-sm font-bold text-slate-700 bg-transparent"
-              />
-            </div>
-          </div>
-        </div>
-        
-        {/* SUMMARY CARDS *//*
-        <div className="flex flex-wrap gap-4">
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm min-w-[160px]">
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Bank Total (SMS)</p>
-            <p className="text-2xl font-black text-blue-600 font-mono">KES {totalActualMpesa.toLocaleString()}</p>
-          </div>
-          
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm min-w-[160px]">
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Verified App Sales</p>
-            <p className="text-2xl font-black text-emerald-600 font-mono">KES {totalVerifiedMpesa.toLocaleString()}</p>
-          </div>
-
-          <div className={`p-5 rounded-2xl border shadow-md min-w-[180px] transition-all ${totalMissingMoney > 0 ? 'bg-red-600 border-red-700' : 'bg-emerald-50 border-emerald-200'}`}>
-            <div className="flex items-center justify-between mb-1">
-              <p className={`text-[10px] font-black uppercase tracking-widest ${totalMissingMoney > 0 ? 'text-red-100' : 'text-emerald-600'}`}>Daily Discrepancy</p>
-              {totalMissingMoney > 0 && <TrendingDown size={14} className="text-white animate-bounce" />}
-            </div>
-            <p className={`text-2xl font-black font-mono ${totalMissingMoney > 0 ? 'text-white' : 'text-emerald-700'}`}>
-              KES {totalMissingMoney.toLocaleString()}
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div className="mb-8">
-        <StatementUpload businessId={businessId} />
-      </div>
-
-      {/* THEFT ALERT BOX *//*
-      {unmatchedLogs.length > 0 && (
-        <div className="mb-6 bg-amber-50 border-l-8 border-amber-500 p-6 rounded-r-2xl shadow-sm flex items-start gap-5">
-          <div className="bg-amber-500 p-3 rounded-xl text-white shadow-lg">
-            <AlertCircle size={28} />
-          </div>
-          <div>
-            <h4 className="font-black text-amber-900 text-lg">Warning: {unmatchedLogs.length} Unclaimed Payments</h4>
-            <p className="text-amber-800 opacity-90 leading-relaxed font-medium">
-              We detected M-Pesa messages for this day that do not have a matching sale in the app. 
-              This usually means an attendant received money but did not "Okay" or save the transaction.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* MAIN DATA TABLE *//*
-      <div className="bg-white rounded-[2rem] shadow-2xl border border-slate-200 overflow-hidden">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-slate-900 text-slate-400 text-[10px] uppercase tracking-[0.2em] font-black">
-              <th className="p-6">Origin / Staff</th>
-              <th className="p-6">Transaction Code</th>
-              <th className="p-6">App Amount</th>
-              <th className="p-6">Bank Amount</th>
-              <th className="p-6">Final Status</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            
-            {/* 1. RENDER GHOST PAYMENTS (UNMATCHED BANK LOGS) *//*
-            {unmatchedLogs.map((log, idx) => (
-              <tr key={`unmatched-${idx}`} className="bg-rose-50/50 hover:bg-rose-100/50 transition-colors">
-                <td className="p-6 flex items-center gap-4">
-                  <div className="w-10 h-10 bg-rose-200 rounded-2xl flex items-center justify-center text-rose-700 shadow-inner">
-                    <Smartphone size={20} />
-                  </div>
-                  <div>
-                    <p className="font-black text-rose-700 text-sm">BANK LOG ONLY</p>
-                    <p className="text-[11px] text-rose-400 font-bold italic tracking-tighter">No sale entry found</p>
-                  </div>
-                </td>
-                <td className="p-6 font-mono text-xs font-black text-rose-800 select-all">{log.transactionCode}</td>
-                <td className="p-6 text-slate-300 font-bold">---</td>
-                <td className="p-6 font-black text-rose-700">KES {Number(log.amount).toLocaleString()}</td>
-                <td className="p-6">
-                  <span className="bg-rose-600 text-white px-4 py-1.5 rounded-full text-[10px] font-black uppercase shadow-sm">MISSING SALE</span>
-                </td>
-              </tr>
-            ))}
-
-            {/* 2. RENDER SALES RECORDS *//*
-            {sales.map(sale => {
-              const actualLog = mpesaLogs.find(log => 
-                log.transactionCode?.toUpperCase() === sale.transactionCode?.toUpperCase()
-              );
-              
-              const isMpesaLabel = sale.paymentMethod?.toLowerCase() === 'mpesa';
-              const isMatched = actualLog && Number(actualLog.amount) === Number(sale.amount);
-              const isMismatch = actualLog && Number(actualLog.amount) !== Number(sale.amount);
-              const isFake = isMpesaLabel && !actualLog;
-
-              return (
-                <tr key={sale.id} className={`${isFake || isMismatch ? 'bg-amber-50/30' : 'hover:bg-slate-50'} transition-colors group`}>
-                  <td className="p-6 flex items-center gap-4">
-                    <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shadow-inner transition-transform group-hover:scale-110 ${actualLog ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>
-                      {actualLog ? <Smartphone size={20} /> : <Receipt size={20} />}
-                    </div>
-                    <div>
-                      <p className="font-black text-slate-800 text-sm tracking-tight">{sale.attendantName || sale.userName || "Unknown Staff"}</p>
-                      <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">
-                        {actualLog ? 'M-PESA' : (sale.paymentMethod || 'CASH')}
-                      </p>
-                    </div>
-                  </td>
-                  
-                  <td className="p-6 font-mono text-xs text-slate-500 font-semibold">{sale.transactionCode || "---"}</td>
-                  
-                  <td className="p-6 font-black text-slate-900">KES {Number(sale.amount).toLocaleString()}</td>
-                  
-                  <td className={`p-6 font-black ${isMismatch ? 'text-rose-600 underline' : 'text-slate-500'}`}>
-                    {actualLog ? `KES ${Number(actualLog.amount).toLocaleString()}` : "--"}
-                  </td>
-
-                  <td className="p-6">
-                    {isMatched ? (
-                      <div className="flex items-center gap-2 text-emerald-600 bg-emerald-100/50 w-fit px-3 py-1.5 rounded-lg border border-emerald-200">
-                        <CheckCircle size={16} />
-                        <span className="text-[10px] font-black uppercase">Verified Match</span>
-                      </div>
-                    ) : isMismatch ? (
-                      <div className="flex items-center gap-2 text-amber-600 bg-amber-100/50 w-fit px-3 py-1.5 rounded-lg border border-amber-200">
-                        <AlertCircle size={16} />
-                        <span className="text-[10px] font-black uppercase tracking-tighter">Amount Mismatch</span>
-                      </div>
-                    ) : isFake ? (
-                      <div className="flex items-center gap-2 text-rose-600 bg-rose-100/50 w-fit px-3 py-1.5 rounded-lg border border-rose-200 animate-pulse">
-                        <AlertCircle size={16} />
-                        <span className="text-[10px] font-black uppercase tracking-tighter">Code Not Found</span>
-                      </div>
-                    ) : (
-                      <span className="text-slate-400 font-black text-[10px] uppercase tracking-widest bg-slate-100 px-3 py-1.5 rounded-lg">
-                        Unverified Cash
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-
-            {/* EMPTY STATE *//*
-            {sales.length === 0 && mpesaLogs.length === 0 && (
-              <tr>
-                <td colSpan="5" className="p-20 text-center flex flex-col items-center">
-                   <Info size={40} className="text-slate-200 mb-4" />
-                   <p className="text-slate-400 font-black text-lg">No records found for this date.</p>
-                   <p className="text-slate-400 text-sm">Select a different day or wait for sales to sync.</p>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}*/
-
-
-
-
-
-
-
-
-
-
-
-
-/*import React, { useState, useEffect } from "react";
-import { collection, query, where, getDocs, orderBy } from "firebase/firestore";
-import { db } from "../firebase";
-import { Search, AlertCircle, CheckCircle } from "lucide-react";
-
-export default function Reconciliation({ businessId }) {
-  const [sales, setSales] = useState([]);
-  const [mpesaLogs, setMpesaLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    if (!businessId) return;
-
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        // 1. Fetch Sales (Filtered by Business)
-        const salesQ = query(
-          collection(db, "payments"), 
-          where("businessId", "==", businessId)
-          // Note: If you add orderBy("createdAt"), you MUST create a composite index in Firebase
-        );
-        
-        // 2. Fetch M-Pesa Official Logs (from SMS Reader)
-        const mpesaQ = query(
-          collection(db, "mpesa_logs"), 
-          where("businessId", "==", businessId)
-        );
-
-        const [salesSnap, mpesaSnap] = await Promise.all([getDocs(salesQ), getDocs(mpesaQ)]);
-        
-        setSales(salesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-        setMpesaLogs(mpesaSnap.docs.map(doc => doc.data()));
-      } catch (error) {
-        console.error("Reconciliation fetch error:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchData();
-  }, [businessId]);
-
-  if (loading) return <div className="p-8">Loading records...</div>;
-
-  return (
-    <div className="p-8">
-      <h2 className="text-2xl font-bold mb-6">M-Pesa Reconciliation Engine</h2>
-      
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <table className="w-full text-left">
-          <thead className="bg-slate-50 border-b">
-            <tr>
-              <th className="p-4 text-sm font-semibold text-slate-600">Attendant</th>
-              <th className="p-4 text-sm font-semibold text-slate-600">Sale Amount</th>
-              <th className="p-4 text-sm font-semibold text-slate-600">M-Pesa Code</th>
-              <th className="p-4 text-sm font-semibold text-slate-600">Verification Status</th>
-              <th className="p-4 text-sm font-semibold text-slate-600">Actual M-Pesa</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sales.map(sale => {
-              // THE MATCHING LOGIC
-              const actualLog = mpesaLogs.find(log => log.transactionCode === sale.transactionCode);
-              const isMpesa = sale.paymentMethod === 'mpesa';
-              const isFake = isMpesa && !actualLog;
-
-              return (
-                <tr key={sale.id} className={`border-b ${isFake ? 'bg-red-50' : ''}`}>
-                  <td className="p-4">{sale.attendantName || "Staff"}</td>
-                  <td className="p-4 font-bold">KES {sale.amount}</td>
-                  <td className="p-4 font-mono text-sm">{sale.transactionCode}</td>
-                  <td className="p-4">
-                    {!isMpesa ? (
-                      <span className="text-slate-400 text-xs">CASH</span>
-                    ) : actualLog ? (
-                      <div className="flex items-center gap-1 text-green-600">
-                        <CheckCircle size={14} />
-                        <span className="text-xs font-bold">VERIFIED</span>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1 text-red-600">
-                        <AlertCircle size={14} />
-                        <span className="text-xs font-bold">FAKE / MISSING</span>
-                      </div>
-                    )}
-                  </td>
-                  <td className="p-4 text-slate-500">
-                    {actualLog ? `KES ${actualLog.amount}` : "--"}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}*/
