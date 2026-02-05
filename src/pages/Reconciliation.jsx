@@ -277,7 +277,7 @@ salesData.forEach(d => {
         });
 
         // --- B. Process Jobs (Account Deposits) ---
-        jobs.filter(j => j.paidAmount > 0).forEach(j => {
+        /*jobs.filter(j => j.paidAmount > 0).forEach(j => {
             const method = (j.paymentMethod || "cash").toLowerCase();
             const isPaybill = method.includes('paybill') || method.includes('till') || method.includes('buy goods');
 
@@ -293,7 +293,36 @@ salesData.forEach(d => {
                 amount: j.paidAmount, 
                 date: j.createdAt 
             });
-        });
+        });*/
+        // --- B. Process Jobs (Account Deposits) ---
+// ONLY show jobs if they are NOT already recorded as a payment.
+// If your system creates a 'payment' doc for every job, you can comment this entire block out.
+jobs.filter(j => j.paidAmount > 0).forEach(j => {
+    
+    // 1. Check if this job payment already exists in the 'sales' list
+    // We check if a sale exists with the same Amount AND roughly the same Time (within 1 min)
+    const isDuplicate = sales.some(s => 
+        Math.abs(s.amount - j.paidAmount) < 1 && // Amounts match
+        Math.abs(s.createdAt.seconds - j.createdAt.seconds) < 60 // Created within 60 seconds of each other
+    );
+
+    // If it's a duplicate, SKIP IT.
+    if (isDuplicate) return;
+
+    // Standard Filters
+    const method = (j.paymentMethod || "cash").toLowerCase();
+    const isPaybill = method.includes('paybill') || method.includes('till') || method.includes('buy goods');
+
+    if (activeTab === 'paybill' && !isPaybill) return;
+    if (activeTab === 'sales' && isPaybill) return;
+
+    combined.push({ 
+        ...j, 
+        type: 'job', 
+        amount: j.paidAmount, 
+        date: j.createdAt 
+    });
+});
     }
 
     // =========================================================
@@ -313,8 +342,31 @@ salesData.forEach(d => {
     // 3. PROCESS PAYBILL LOGS (Money In - SMS Side)
     // =========================================================
     // This shows the raw SMS log for paybill so you can compare with App Sales
+    /*if (activeTab === 'all' || activeTab === 'paybill') {
+        logs.filter(l => l.type === 'paybill_sale').forEach(l => {
+            combined.push({ 
+                ...l, 
+                type: 'paybill_log', 
+                date: l.createdAt, 
+                description: "Paybill Income (SMS)" 
+            });
+        });
+    }*/
     if (activeTab === 'all' || activeTab === 'paybill') {
         logs.filter(l => l.type === 'paybill_sale').forEach(l => {
+            
+            const logCode = (l.transactionCode || "").toUpperCase();
+
+            // 1. Check if this log is already shown as a SALE
+            const existsInSales = sales.some(s => (s.transactionCode || "").toUpperCase() === logCode);
+
+            // 2. Check if this log is already shown as a JOB
+            const existsInJobs = jobs.some(j => (j.transactionCode || "").toUpperCase() === logCode);
+
+            // 🛑 STOP: If we found this transaction in Sales or Jobs, DO NOT add the raw log.
+            // The "SALE" row will handle showing it (and will be marked VERIFIED).
+            if (existsInSales || existsInJobs) return;
+
             combined.push({ 
                 ...l, 
                 type: 'paybill_log', 
@@ -370,6 +422,8 @@ salesData.forEach(d => {
   };
 
   const displayData = getDisplayData();
+
+  
 
 
   if (loading) {
@@ -596,59 +650,131 @@ salesData.forEach(d => {
                 <tr><td colSpan="5" className="p-10 text-center text-slate-400 font-bold">No records found for this view.</td></tr>
             ) : (
                 displayData.map((item, idx) => {
-                    // Logic to find matching log if it's a sale
-                    const itemCode = (item.transactionCode || "").toUpperCase();
-                    const amount = Number(item.amount || item.paidAmount || 0);
-                    
-                    let statusColor = "bg-slate-100 text-slate-500";
-                    let statusText = "Recorded";
 
-                    if (item.type === 'missing_sale' || item.type === 'missing_expense') {
-                        statusColor = "bg-rose-100 text-rose-600";
-                        statusText = "MISSING";
-                    } else if (item.type === 'float_log') {
-                        statusColor = "bg-blue-100 text-blue-600";
-                        statusText = "FLOAT";
-                    } else if (item.paymentMethod === 'cash') {
-                         statusColor = "bg-emerald-100 text-emerald-600";
-                         statusText = "CASH";
-                    } else {
-                         // Check verification
-                         const hasLog = logs.some(l => (l.transactionCode || "").toUpperCase() === itemCode && Number(l.amount) === amount);
-                         if(hasLog) { statusColor = "bg-emerald-100 text-emerald-600"; statusText = "VERIFIED"; }
-                    }
+    // ===============================================
+    // 1. PREPARE VARIABLES
+    // ===============================================
+    const itemCode = (item.transactionCode || "").toUpperCase();
+    const amount = Number(item.amount || item.paidAmount || 0);
 
-                    const recordedBy = item.attendantName || item.userName || item.createdBy || "System";
+    // ===============================================
+    // 2. FIND MATCHING LOG (Crucial Step)
+    // ===============================================
+    // We do this EARLY so we can use the log data for the badge
+    const matchedLog = logs.find(l => 
+        (l.transactionCode || "").toUpperCase() === itemCode && 
+        Number(l.amount) === amount
+    );
+
+    // ===============================================
+    // 3. GENERATE SOURCE BADGE
+    // ===============================================
+    const getSourceBadge = (itm, linkedLog) => {
+        // Combine App Text + SMS Log Text (if available)
+        const logText = linkedLog ? (linkedLog.sender || "") : "";
+        const appText = (itm.sender || itm.description || itm.paymentMethod || "");
+        const rawText = (logText + " " + appText).toUpperCase();
+        
+        const method = (itm.paymentMethod || itm.type || "").toLowerCase();
+
+        // A. Check Specific Banks
+        if (rawText.includes("EQUITY")) return { label: "EQUITY BANK", color: "bg-red-100 text-red-700 border-red-200" };
+        if (rawText.includes("KCB")) return { label: "KCB BANK", color: "bg-lime-100 text-lime-700 border-lime-200" };
+        if (rawText.includes("CO-OP") || rawText.includes("COOP")) return { label: "CO-OP BANK", color: "bg-emerald-100 text-emerald-700 border-emerald-200" };
+        if (rawText.includes("NCBA") || rawText.includes("FAMILY")) return { label: "FAMILY/NCBA", color: "bg-blue-100 text-blue-700 border-blue-200" };
+        if (rawText.includes("SACCO") || rawText.includes("FOSA")) return { label: "SACCO", color: "bg-indigo-100 text-indigo-700 border-indigo-200" };
+
+        // B. Fallbacks
+        if (method.includes('cash')) return { label: "CASH", color: "bg-slate-100 text-slate-500 border-slate-200" };
+        if (method.includes('paybill') || method.includes('till')) return { label: "PAYBILL", color: "bg-purple-100 text-purple-700 border-purple-200" };
+        if (method.includes('bank')) return { label: "BANK TRF", color: "bg-blue-50 text-blue-600 border-blue-100" };
+        
+        return { label: "M-PESA", color: "bg-green-50 text-green-600 border-green-100" };
+    };
+
+    // Call the function passing BOTH item and the log we found
+    const source = getSourceBadge(item, matchedLog);
+
+    // ===============================================
+    // 4. DETERMINE STATUS
+    // ===============================================
+    let statusColor = "bg-slate-100 text-slate-500";
+    let statusText = "Recorded";
+
+    if (item.type === 'missing_sale' || item.type === 'missing_expense') {
+        statusColor = "bg-rose-100 text-rose-600";
+        statusText = "MISSING";
+    } else if (item.type === 'float_log') {
+        statusColor = "bg-blue-100 text-blue-600";
+        statusText = "FLOAT";
+    } else if (item.paymentMethod === 'cash') {
+            statusColor = "bg-emerald-100 text-emerald-600";
+            statusText = "CASH";
+    } else {
+            // Use the matchedLog variable we found in Step 2
+            if(matchedLog) { 
+                statusColor = "bg-emerald-100 text-emerald-600"; 
+                statusText = "VERIFIED"; 
+            }
+    }
+
+    const recordedBy = item.attendantName || item.userName || item.createdBy || "System";
 
 return (
-    <tr key={`${item.id}-${idx}`} onClick={() => setSelectedTransaction(item)} className="hover:bg-slate-50 cursor-pointer transition-colors group">
-       <td className="p-5">
-            <div className="flex items-center gap-3">
-                <div className={`p-2 rounded-lg ${
-                    item.type.includes('expense') ? 'bg-orange-100 text-orange-600' : 
-                    item.type.includes('float') ? 'bg-blue-100 text-blue-600' : 
-                    'bg-slate-100 text-slate-600'
-                }`}>
-                    {item.type.includes('expense') ? <Briefcase size={16} /> : 
-                     item.type.includes('float') ? <ArrowRightLeft size={16} /> : 
-                     <Receipt size={16} />}
+     <tr key={`${item.id}-${idx}`} onClick={() => setSelectedTransaction(item)} className="hover:bg-slate-50 cursor-pointer transition-colors group">
+            
+            {/* TYPE COLUMN */}
+            <td className="p-5">
+                <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-lg ${
+                        item.type.includes('expense') ? 'bg-orange-100 text-orange-600' : 
+                        item.type.includes('float') ? 'bg-blue-100 text-blue-600' : 
+                        'bg-slate-100 text-slate-600'
+                    }`}>
+                        {item.type.includes('expense') ? <Briefcase size={16} /> : 
+                            item.type.includes('float') ? <ArrowRightLeft size={16} /> : 
+                            <Receipt size={16} />}
+                    </div>
+                    <div>
+                        <span className="block text-xs font-bold uppercase text-slate-500">{item.type.replace('_', ' ')}</span>
+                        <span className="text-[10px] font-semibold text-slate-400">By: {recordedBy}</span>
+                    </div>
                 </div>
-                <div>
-                     <span className="block text-xs font-bold uppercase text-slate-500">{item.type.replace('_', ' ')}</span>
-                     {/* ADDED ATTENDANT NAME HERE */}
-                     <span className="text-[10px] font-semibold text-slate-400">By: {recordedBy}</span>
+            </td>
+
+            {/* REFERENCE + BADGE COLUMN */}
+            <td className="p-5">
+                <div className="font-mono text-xs font-bold text-slate-700 mb-1">
+                    {item.transactionCode || "---"}
                 </div>
-            </div>
-       </td>
-                           <td className="p-5 font-mono text-xs font-bold text-slate-600">{item.transactionCode || "---"}</td>
-                           <td className="p-5 text-sm font-bold text-slate-800">{item.description || item.jobName || item.sender || "N/A"}</td>
-                           <td className={`p-5 font-black text-sm ${item.type.includes('expense') ? 'text-orange-600' : 'text-slate-900'}`}>
-                               KES {amount.toLocaleString()}
-                           </td>
-                           <td className="p-5 text-right">
-                               <span className={`px-3 py-1 rounded-md text-[10px] font-black uppercase ${statusColor}`}>{statusText}</span>
-                           </td>
-                        </tr>
+                <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-black tracking-wider uppercase border ${source.color}`}>
+                    {source.label}
+                </span>
+            </td>
+
+            {/* DESCRIPTION COLUMN */}
+            <td className="p-5 text-sm font-bold text-slate-800">
+                {item.description || 
+                item.customerName || 
+                item.clientName || 
+                item.jobName || 
+                item.sender || 
+                (item.items && item.items.length > 0 ? item.items.map(i => i.name).join(", ") : "General Sale")}
+            </td>
+
+            {/* AMOUNT COLUMN */}
+            <td className={`p-5 font-black text-sm ${
+                source.label === 'CASH' ? 'text-slate-500' : 
+                item.type.includes('expense') ? 'text-orange-600' : 'text-slate-900'
+            }`}>
+                KES {amount.toLocaleString()}
+            </td>
+
+            {/* STATUS COLUMN */}
+            <td className="p-5 text-right">
+                <span className={`px-3 py-1 rounded-md text-[10px] font-black uppercase ${statusColor}`}>{statusText}</span>
+            </td>
+        </tr>
                     );
                 })
             )}
