@@ -457,6 +457,23 @@ jobs.filter(j => j.paidAmount > 0).forEach(j => {
                        selectedTransaction.createdBy || 
                        "System Auto-Sync";
 
+    // 1. Create a helper to determine what text to show
+const getDisplayTitle = () => {
+    // A. Use explicit description/sender if available (usually M-Pesa logs or Jobs)
+    if (selectedTransaction.description) return selectedTransaction.description;
+    if (selectedTransaction.jobName) return selectedTransaction.jobName;
+    if (selectedTransaction.sender) return selectedTransaction.sender;
+
+    // B. If it's a Retail Sale, combine the item names
+    if (selectedTransaction.items && selectedTransaction.items.length > 0) {
+        // Creates a string like "Tags, Milk, Bread"
+        return selectedTransaction.items.map(i => i.name).join(", ");
+    }
+
+    // C. Fallback
+    return "General Retail Sale";
+};
+
     return (
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
         <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in duration-200">
@@ -480,9 +497,12 @@ jobs.filter(j => j.paidAmount > 0).forEach(j => {
              {/* MAIN CARD */}
              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-4">
                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Description / Sender</p>
-                 <p className="text-lg font-black text-slate-800">
+                 {/*<p className="text-lg font-black text-slate-800">
                     {selectedTransaction.description || selectedTransaction.jobName || selectedTransaction.sender || "N/A"}
-                 </p>
+                 </p>*/}
+                  <p className="text-lg font-black text-slate-800 break-words">
+                    {getDisplayTitle()}
+                  </p>
                  <div className="mt-3 flex justify-between items-end border-t border-slate-100 pt-2">
                     <div>
                         <p className="text-[10px] text-slate-400 font-bold uppercase">Recorded By</p>
@@ -645,7 +665,7 @@ jobs.filter(j => j.paidAmount > 0).forEach(j => {
               <th className="p-5 text-right">Status</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-50">
+          {/*<tbody className="divide-y divide-slate-50">
             {displayData.length === 0 ? (
                 <tr><td colSpan="5" className="p-10 text-center text-slate-400 font-bold">No records found for this view.</td></tr>
             ) : (
@@ -723,7 +743,7 @@ jobs.filter(j => j.paidAmount > 0).forEach(j => {
 return (
      <tr key={`${item.id}-${idx}`} onClick={() => setSelectedTransaction(item)} className="hover:bg-slate-50 cursor-pointer transition-colors group">
             
-            {/* TYPE COLUMN */}
+            {/* TYPE COLUMN *//*
             <td className="p-5">
                 <div className="flex items-center gap-3">
                     <div className={`p-2 rounded-lg ${
@@ -742,7 +762,7 @@ return (
                 </div>
             </td>
 
-            {/* REFERENCE + BADGE COLUMN */}
+            {/* REFERENCE + BADGE COLUMN *//*
             <td className="p-5">
                 <div className="font-mono text-xs font-bold text-slate-700 mb-1">
                     {item.transactionCode || "---"}
@@ -752,7 +772,7 @@ return (
                 </span>
             </td>
 
-            {/* DESCRIPTION COLUMN */}
+            {/* DESCRIPTION COLUMN *//*
             <td className="p-5 text-sm font-bold text-slate-800">
                 {item.description || 
                 item.customerName || 
@@ -762,7 +782,7 @@ return (
                 (item.items && item.items.length > 0 ? item.items.map(i => i.name).join(", ") : "General Sale")}
             </td>
 
-            {/* AMOUNT COLUMN */}
+            {/* AMOUNT COLUMN *//*
             <td className={`p-5 font-black text-sm ${
                 source.label === 'CASH' ? 'text-slate-500' : 
                 item.type.includes('expense') ? 'text-orange-600' : 'text-slate-900'
@@ -770,15 +790,153 @@ return (
                 KES {amount.toLocaleString()}
             </td>
 
-            {/* STATUS COLUMN */}
+            {/* STATUS COLUMN *//*
             <td className="p-5 text-right">
                 <span className={`px-3 py-1 rounded-md text-[10px] font-black uppercase ${statusColor}`}>{statusText}</span>
             </td>
-        </tr>
+           </tr>
                     );
                 })
             )}
-          </tbody>
+          </tbody>*/}
+          <tbody className="divide-y divide-slate-50">
+  {displayData.length === 0 ? (
+    <tr><td colSpan="5" className="p-10 text-center text-slate-400 font-bold">No records found for this view.</td></tr>
+  ) : (
+    displayData.map((item, idx) => {
+
+      // ===============================================
+      // 1. PREPARE VARIABLES
+      // ===============================================
+      const itemCode = (item.transactionCode || "").trim().toUpperCase();
+      const amount = Number(item.amount || item.paidAmount || 0);
+      const method = (item.paymentMethod || item.type || "").toLowerCase();
+
+      // ===============================================
+      // 2. FIND MATCHING LOG (Strict Match)
+      // ===============================================
+      // We strictly require a code length > 4 to prevent matching "CASH", "N/A" or empty strings
+      const matchedLog = (itemCode.length > 4 && amount > 0) 
+        ? logs.find(l => 
+            (l.transactionCode || "").toUpperCase() === itemCode && 
+            Number(l.amount) === amount
+          )
+        : null;
+
+      // ===============================================
+      // 3. GENERATE SOURCE BADGE
+      // ===============================================
+      const getSourceBadge = (itm, linkedLog) => {
+        const logText = linkedLog ? (linkedLog.sender || "") : "";
+        const appText = (itm.sender || itm.description || itm.paymentMethod || "");
+        const rawText = (logText + " " + appText).toUpperCase();
+        
+        if (rawText.includes("EQUITY")) return { label: "EQUITY BANK", color: "bg-red-100 text-red-700 border-red-200" };
+        if (rawText.includes("KCB")) return { label: "KCB BANK", color: "bg-lime-100 text-lime-700 border-lime-200" };
+        if (rawText.includes("CO-OP") || rawText.includes("COOP")) return { label: "CO-OP BANK", color: "bg-emerald-100 text-emerald-700 border-emerald-200" };
+        if (method.includes('cash')) return { label: "CASH", color: "bg-slate-100 text-slate-500 border-slate-200" };
+        if (method.includes('paybill') || method.includes('till')) return { label: "PAYBILL", color: "bg-purple-100 text-purple-700 border-purple-200" };
+        if (method.includes('bank')) return { label: "BANK TRF", color: "bg-blue-50 text-blue-600 border-blue-100" };
+        
+        return { label: "M-PESA", color: "bg-green-50 text-green-600 border-green-100" };
+      };
+
+      const source = getSourceBadge(item, matchedLog);
+
+      // ===============================================
+      // 4. DETERMINE STATUS (Fixed Logic)
+      // ===============================================
+      let statusColor = "bg-orange-100 text-orange-700"; // Default to Warning
+      let statusText = "UNVERIFIED";
+
+      // A. Handle Missing / Discrepancies
+      if (item.type === 'missing_sale' || item.type === 'missing_expense') {
+        statusColor = "bg-rose-100 text-rose-600";
+        statusText = "MISSING";
+      } 
+      // B. Handle Float
+      else if (item.type === 'float_log') {
+        statusColor = "bg-blue-100 text-blue-600";
+        statusText = "FLOAT";
+      } 
+      // C. Handle Raw Paybill Logs (that were not matched to sales in getDisplayData)
+      else if (item.type === 'paybill_log') {
+        statusColor = "bg-slate-100 text-slate-500";
+        statusText = "NO APP SALE";
+      }
+      // D. Handle Cash
+      else if (method.includes('cash')) {
+        statusColor = "bg-slate-100 text-slate-500";
+        statusText = "CASH";
+      } 
+      // E. Handle Digital Verification (The Core Fix)
+      else {
+        if (matchedLog) {
+          statusColor = "bg-emerald-100 text-emerald-600";
+          statusText = "VERIFIED";
+        } else {
+          // It is M-Pesa/Bank, but NO log found
+          statusColor = "bg-orange-100 text-orange-700";
+          statusText = "UNVERIFIED";
+        }
+      }
+
+      const recordedBy = item.attendantName || item.userName || item.createdBy || "System";
+
+      return (
+        <tr key={`${item.id}-${idx}`} onClick={() => setSelectedTransaction(item)} className="hover:bg-slate-50 cursor-pointer transition-colors group">
+          
+          {/* TYPE */}
+          <td className="p-5">
+            <div className="flex items-center gap-3">
+              <div className={`p-2 rounded-lg ${
+                item.type.includes('expense') ? 'bg-orange-100 text-orange-600' : 
+                item.type.includes('float') ? 'bg-blue-100 text-blue-600' : 
+                'bg-slate-100 text-slate-600'
+              }`}>
+                {item.type.includes('expense') ? <Briefcase size={16} /> : 
+                 item.type.includes('float') ? <ArrowRightLeft size={16} /> : 
+                 <Receipt size={16} />}
+              </div>
+              <div>
+                <span className="block text-xs font-bold uppercase text-slate-500">{item.type.replace('_', ' ')}</span>
+                <span className="text-[10px] font-semibold text-slate-400">By: {recordedBy}</span>
+              </div>
+            </div>
+          </td>
+
+          {/* REFERENCE */}
+          <td className="p-5">
+            <div className="font-mono text-xs font-bold text-slate-700 mb-1">
+              {item.transactionCode || "---"}
+            </div>
+            <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-black tracking-wider uppercase border ${source.color}`}>
+              {source.label}
+            </span>
+          </td>
+
+          {/* DESCRIPTION */}
+          <td className="p-5 text-sm font-bold text-slate-800">
+            {item.description || item.customerName || item.jobName || item.sender || "General Sale"}
+          </td>
+
+          {/* AMOUNT */}
+          <td className={`p-5 font-black text-sm ${
+            source.label === 'CASH' ? 'text-slate-500' : 
+            item.type.includes('expense') ? 'text-orange-600' : 'text-slate-900'
+          }`}>
+            KES {amount.toLocaleString()}
+          </td>
+
+          {/* STATUS */}
+          <td className="p-5 text-right">
+            <span className={`px-3 py-1 rounded-md text-[10px] font-black uppercase ${statusColor}`}>{statusText}</span>
+          </td>
+        </tr>
+      );
+    })
+  )}
+</tbody>
         </table>
       </div>
     </div>
