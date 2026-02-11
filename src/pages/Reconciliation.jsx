@@ -31,6 +31,7 @@ export default function Reconciliation({ businessId }) {
   const [jobs, setJobs] = useState([]); // From 'accounts'
   const [logs, setLogs] = useState([]);
   const [expenses, setExpenses] = useState([]); 
+  const [usersMap, setUsersMap] = useState({});
   
   const [selectedTransaction, setSelectedTransaction] = useState(null);
 
@@ -423,8 +424,18 @@ jobs.filter(j => j.paidAmount > 0).forEach(j => {
 
   const displayData = getDisplayData();
 
-  
-
+  useEffect(() => {
+  const fetchUsers = async () => {
+    const snapshot = await getDocs(collection(db, "users"));
+    const map = {};
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      map[doc.id] = data.name || `${data.firstName || ""} ${data.lastName || ""}`.trim();
+    });
+    setUsersMap(map);
+  };
+  fetchUsers();
+}, []);
 
   if (loading) {
     return (
@@ -881,7 +892,14 @@ return (
         }
       }
 
-      const recordedBy = item.attendantName || item.userName || item.createdBy || "System";
+      //const recordedBy = item.attendantName || item.userName || item.createdBy || "System";
+      
+      const recordedBy = item.attendantName 
+                  || item.userName 
+                  || item.createdBy 
+                  || (item.ownerId && usersMap[item.ownerId]) 
+                  || "System";
+
 
       return (
         <tr key={`${item.id}-${idx}`} onClick={() => setSelectedTransaction(item)} className="hover:bg-slate-50 cursor-pointer transition-colors group">
