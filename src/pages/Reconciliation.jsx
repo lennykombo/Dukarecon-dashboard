@@ -221,34 +221,7 @@ salesData.forEach(d => {
   const netCash = stats.appCash - stats.expCash; 
 
   const paybillDiff = stats.smsPaybill - stats.appPaybill;
-  // --- MERGE LISTS FOR TABLE DISPLAY ---
-  /*const getDisplayData = () => {
-    const combined = [];
-
-    // 1. Sales & Jobs
-    if (activeTab === 'all' || activeTab === 'sales') {
-        sales.forEach(s => combined.push({ ...s, type: 'sale', date: s.createdAt }));
-        jobs.filter(j => j.paidAmount > 0).forEach(j => combined.push({ ...j, type: 'job', amount: j.paidAmount, date: j.createdAt }));
-    }
-
-    // 2. Expenses
-    if (activeTab === 'all' || activeTab === 'expenses') {
-        expenses.forEach(e => combined.push({ ...e, type: 'app_expense', date: e.createdAt }));
-    }
-
-    // 3. Float Logs (Only from SMS)
-    if (activeTab === 'all' || activeTab === 'float') {
-        logs.filter(l => l.category === 'float_in').forEach(l => combined.push({ ...l, type: 'float_log', date: l.createdAt, description: "Float Deposit / B2C" }));
-    }
-
-    // 4. Unmatched
-    if (activeTab === 'unmatched') {
-        stats.unmatchedLogs.forEach(l => combined.push({ ...l, type: 'missing_sale', date: l.createdAt, description: "Unrecorded Sale" }));
-        stats.unmatchedExpenses.forEach(l => combined.push({ ...l, type: 'missing_expense', date: l.createdAt, description: "Unrecorded Expense" }));
-    }
-
-    return combined.sort((a, b) => b.date.seconds - a.date.seconds);
-  };*/
+  
 
    // --- MERGE LISTS FOR TABLE DISPLAY ---
   const getDisplayData = () => {
@@ -278,27 +251,8 @@ salesData.forEach(d => {
         });
 
         // --- B. Process Jobs (Account Deposits) ---
-        /*jobs.filter(j => j.paidAmount > 0).forEach(j => {
-            const method = (j.paymentMethod || "cash").toLowerCase();
-            const isPaybill = method.includes('paybill') || method.includes('till') || method.includes('buy goods');
-
-            // FILTER: If tab is 'paybill', ONLY show paybill items
-            if (activeTab === 'paybill' && !isPaybill) return;
-
-            // FILTER: If tab is 'sales', HIDE paybill items
-            if (activeTab === 'sales' && isPaybill) return;
-
-            combined.push({ 
-                ...j, 
-                type: 'job', 
-                amount: j.paidAmount, 
-                date: j.createdAt 
-            });
-        });*/
-        // --- B. Process Jobs (Account Deposits) ---
-// ONLY show jobs if they are NOT already recorded as a payment.
-// If your system creates a 'payment' doc for every job, you can comment this entire block out.
-jobs.filter(j => j.paidAmount > 0).forEach(j => {
+        
+    jobs.filter(j => j.paidAmount > 0).forEach(j => {
     
     // 1. Check if this job payment already exists in the 'sales' list
     // We check if a sale exists with the same Amount AND roughly the same Time (within 1 min)
@@ -613,7 +567,9 @@ const getDisplayTitle = () => {
         </div>
       </div>
 
-      <StatementUpload businessId={businessId} />
+      {/*<StatementUpload businessId={businessId} />*/}
+
+      <StatementUpload businessId={businessId} onUploadSuccess={fetchData} />
 
       {/* 1. AUDIT CARDS ROW */}
       <div className="flex flex-wrap gap-4 mb-8 mt-6">
@@ -676,140 +632,7 @@ const getDisplayTitle = () => {
               <th className="p-5 text-right">Status</th>
             </tr>
           </thead>
-          {/*<tbody className="divide-y divide-slate-50">
-            {displayData.length === 0 ? (
-                <tr><td colSpan="5" className="p-10 text-center text-slate-400 font-bold">No records found for this view.</td></tr>
-            ) : (
-                displayData.map((item, idx) => {
-
-    // ===============================================
-    // 1. PREPARE VARIABLES
-    // ===============================================
-    const itemCode = (item.transactionCode || "").toUpperCase();
-    const amount = Number(item.amount || item.paidAmount || 0);
-
-    // ===============================================
-    // 2. FIND MATCHING LOG (Crucial Step)
-    // ===============================================
-    // We do this EARLY so we can use the log data for the badge
-    const matchedLog = logs.find(l => 
-        (l.transactionCode || "").toUpperCase() === itemCode && 
-        Number(l.amount) === amount
-    );
-
-    // ===============================================
-    // 3. GENERATE SOURCE BADGE
-    // ===============================================
-    const getSourceBadge = (itm, linkedLog) => {
-        // Combine App Text + SMS Log Text (if available)
-        const logText = linkedLog ? (linkedLog.sender || "") : "";
-        const appText = (itm.sender || itm.description || itm.paymentMethod || "");
-        const rawText = (logText + " " + appText).toUpperCase();
-        
-        const method = (itm.paymentMethod || itm.type || "").toLowerCase();
-
-        // A. Check Specific Banks
-        if (rawText.includes("EQUITY")) return { label: "EQUITY BANK", color: "bg-red-100 text-red-700 border-red-200" };
-        if (rawText.includes("KCB")) return { label: "KCB BANK", color: "bg-lime-100 text-lime-700 border-lime-200" };
-        if (rawText.includes("CO-OP") || rawText.includes("COOP")) return { label: "CO-OP BANK", color: "bg-emerald-100 text-emerald-700 border-emerald-200" };
-        if (rawText.includes("NCBA") || rawText.includes("FAMILY")) return { label: "FAMILY/NCBA", color: "bg-blue-100 text-blue-700 border-blue-200" };
-        if (rawText.includes("SACCO") || rawText.includes("FOSA")) return { label: "SACCO", color: "bg-indigo-100 text-indigo-700 border-indigo-200" };
-
-        // B. Fallbacks
-        if (method.includes('cash')) return { label: "CASH", color: "bg-slate-100 text-slate-500 border-slate-200" };
-        if (method.includes('paybill') || method.includes('till')) return { label: "PAYBILL", color: "bg-purple-100 text-purple-700 border-purple-200" };
-        if (method.includes('bank')) return { label: "BANK TRF", color: "bg-blue-50 text-blue-600 border-blue-100" };
-        
-        return { label: "M-PESA", color: "bg-green-50 text-green-600 border-green-100" };
-    };
-
-    // Call the function passing BOTH item and the log we found
-    const source = getSourceBadge(item, matchedLog);
-
-    // ===============================================
-    // 4. DETERMINE STATUS
-    // ===============================================
-    let statusColor = "bg-slate-100 text-slate-500";
-    let statusText = "Recorded";
-
-    if (item.type === 'missing_sale' || item.type === 'missing_expense') {
-        statusColor = "bg-rose-100 text-rose-600";
-        statusText = "MISSING";
-    } else if (item.type === 'float_log') {
-        statusColor = "bg-blue-100 text-blue-600";
-        statusText = "FLOAT";
-    } else if (item.paymentMethod === 'cash') {
-            statusColor = "bg-emerald-100 text-emerald-600";
-            statusText = "CASH";
-    } else {
-            // Use the matchedLog variable we found in Step 2
-            if(matchedLog) { 
-                statusColor = "bg-emerald-100 text-emerald-600"; 
-                statusText = "VERIFIED"; 
-            }
-    }
-
-    const recordedBy = item.attendantName || item.userName || item.createdBy || "System";
-
-return (
-     <tr key={`${item.id}-${idx}`} onClick={() => setSelectedTransaction(item)} className="hover:bg-slate-50 cursor-pointer transition-colors group">
-            
-            {/* TYPE COLUMN *//*
-            <td className="p-5">
-                <div className="flex items-center gap-3">
-                    <div className={`p-2 rounded-lg ${
-                        item.type.includes('expense') ? 'bg-orange-100 text-orange-600' : 
-                        item.type.includes('float') ? 'bg-blue-100 text-blue-600' : 
-                        'bg-slate-100 text-slate-600'
-                    }`}>
-                        {item.type.includes('expense') ? <Briefcase size={16} /> : 
-                            item.type.includes('float') ? <ArrowRightLeft size={16} /> : 
-                            <Receipt size={16} />}
-                    </div>
-                    <div>
-                        <span className="block text-xs font-bold uppercase text-slate-500">{item.type.replace('_', ' ')}</span>
-                        <span className="text-[10px] font-semibold text-slate-400">By: {recordedBy}</span>
-                    </div>
-                </div>
-            </td>
-
-            {/* REFERENCE + BADGE COLUMN *//*
-            <td className="p-5">
-                <div className="font-mono text-xs font-bold text-slate-700 mb-1">
-                    {item.transactionCode || "---"}
-                </div>
-                <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-black tracking-wider uppercase border ${source.color}`}>
-                    {source.label}
-                </span>
-            </td>
-
-            {/* DESCRIPTION COLUMN *//*
-            <td className="p-5 text-sm font-bold text-slate-800">
-                {item.description || 
-                item.customerName || 
-                item.clientName || 
-                item.jobName || 
-                item.sender || 
-                (item.items && item.items.length > 0 ? item.items.map(i => i.name).join(", ") : "General Sale")}
-            </td>
-
-            {/* AMOUNT COLUMN *//*
-            <td className={`p-5 font-black text-sm ${
-                source.label === 'CASH' ? 'text-slate-500' : 
-                item.type.includes('expense') ? 'text-orange-600' : 'text-slate-900'
-            }`}>
-                KES {amount.toLocaleString()}
-            </td>
-
-            {/* STATUS COLUMN *//*
-            <td className="p-5 text-right">
-                <span className={`px-3 py-1 rounded-md text-[10px] font-black uppercase ${statusColor}`}>{statusText}</span>
-            </td>
-           </tr>
-                    );
-                })
-            )}
-          </tbody>*/}
+          
           <tbody className="divide-y divide-slate-50">
   {displayData.length === 0 ? (
     <tr><td colSpan="5" className="p-10 text-center text-slate-400 font-bold">No records found for this view.</td></tr>
@@ -893,7 +716,7 @@ return (
       }
 
       //const recordedBy = item.attendantName || item.userName || item.createdBy || "System";
-      
+
       const recordedBy = item.attendantName 
                   || item.userName 
                   || item.createdBy 

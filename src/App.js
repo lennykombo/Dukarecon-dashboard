@@ -8,6 +8,7 @@ import Staff from "./pages/Staff";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup"; 
 import BusinessLedger from "./pages/BusinessLedger";
+import POSReconciliation from "./pages/POSReconciliation";
 
 function App() {
   const { user, loading } = useAuth();
@@ -55,6 +56,8 @@ function App() {
         {activeTab === 'reconciliation' && <Reconciliation businessId={user.businessId} />}
         {activeTab === 'staff' && <Staff businessId={user.businessId} />}
         {activeTab === 'ledger' && <BusinessLedger businessId={user.businessId} />}
+        {activeTab === 'pos' && <POSReconciliation businessId={user.businessId} />}
+
       </main>
     </div>
   );

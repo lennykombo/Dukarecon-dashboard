@@ -46,6 +46,9 @@ export default function Sidebar({ activeTab, setActiveTab, onLogout }) {
         <div onClick={() => setActiveTab('reconciliation')} style={navItemStyle('reconciliation')}>
           Reconciliation
         </div>
+        <div onClick={() => setActiveTab('pos')} style={navItemStyle('pos')}>
+          POS Sales Upload
+        </div>
         <div onClick={() => setActiveTab('ledger')} style={navItemStyle('ledger')}>
           Business Ledger
         </div>
